@@ -1,0 +1,23 @@
+{
+  "id": 123,
+  "name": "rudia",
+  "permanent": true,
+  "address": {
+    "street": "jangseunbaegi-ro 4gil-9",
+    "city": "Seoul",
+    "zipcode": 90909
+  },
+  "phoneNumbers": [
+	 123456,	
+     987654
+  ],
+  "role": "Programmerr",
+  "cities": [
+    "Montreal",
+    "New York"
+  ],
+  "properties": {
+    "age": "29 years",
+    "salary": "1 Dallar"
+  }
+}

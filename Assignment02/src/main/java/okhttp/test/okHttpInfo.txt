@@ -1,0 +1,127 @@
+OkHttp를 통한 HTTP 요청을 하려면 가장 먼저 아래처럼 클라이언트를 만듭니다.
+OkHttpClient client = new OkHttpClient();
+그리고 나서 여기에 넘겨줄 Request를 만들어 줍니다.
+Request request = new Request.Builder().url("http://www.google.com").build();
+그리고 아래처럼 execute() 함수를 호출하면 요청에 대한 응답이 넘어오게 됩니다.
+Response response = client.newCall(request).execute();
+
+OkHttpClient는 앞으로의 HTTP 요청에 사용되는 설정등을 가지고 있습니다. 
+따라서, 이후 HTTP 요청을 하면 이를 기준으로 요청이 이루어 집니다. 
+다음으로 newCall은 어떤 역할을 할까요? newCall은 다음과 같이 Call의 인스턴스를 생성합니다.
+public Call newCall(Request request) {
+  return new Call(this, request);
+}
+Call 클래스는 하나의 HTTP 요청에 따른 Response/Request를 처리합니다. 
+생성시 OkHttpClient와 Request를 받아서 저장하고 있으며 필요에 따라 이것들의 값을 사용하게 됩니다. 
+그런데 OkHttpClient는 그대로 저장하지 않고 client.copyWithDefaults()를 통해 저장합니다. 왜 그럴까요? 
+이렇게 복사를 해서 저장해 놓지 않으면 혹시라도 나중에 client가 변경이 되면 
+그 변경사항이 지금하고 있는 HTTP 요청에 반영이 되기 때문입니다. 지금의 요청은 지금시점의 client가 적용이 되어야 하겠죠? 
+그래서 복사를 하는 것입니다.
+Call 클래스는 바로 요청을 날리는 execute() 함수와 나중에 실행되는 enqueue() 함수가 있습니다.
+먼저 execute 함수부터 살펴보죠. 한번만 실행이 가능하도록 하기 위해 executed 변수를 사용합니다. 
+시작시 true로 설정을 해주어서 한번 실행을 확인합니다. 다음으로는 client의 dispatcher에 요청이 실행되었음을 알리고 
+끝나면 끝났음을 알립니다. 이것을 함으로서 실행 중간에 취소할 수 있게 합니다. getResponseWithInterceptorChain를 통해서 
+서버에 Request를 보내고 이에 대한 Response를 받아옵니다.
+
+public Response execute() throws IOException {
+  synchronized (this) {
+    if (executed) throw new IllegalStateException("Already Executed");
+    executed = true;
+  }
+  try {
+    client.getDispatcher().executed(this);
+    Response result = getResponseWithInterceptorChain(false);
+    if (result == null) throw new IOException("Canceled");
+    return result;
+  } finally {
+    client.getDispatcher().finished(this);
+  }
+}
+
+그런데 요청을 하기전에 한가지 할 수 있는 것이 있습니다. Request를 변경하는 것입니다. 
+예를 들어, Request를 항상 zip으로 압축해서 서버에 보내고자 한다고 생각해 봅시다. 
+이 경우 client의 interceptor에 zip 압축을 하는 interceptor를 저장해 놓습니다. 
+그러면 Request를 보내기 전에 interceptor를 통해 변경된 Request를 받은 후 이 Request를 서버에 보내는 일을 하게 됩니다. 
+이 일을 해주는 함수가 getResponseWithInterrceptorChain 함수입니다. 
+보시다시피 ApplicationInterceptorChain에 원래의 Request를 넣은 후 Interceptor chain을 실행합니다.
+
+private Response getResponseWithInterceptorChain(boolean forWebSocket) throws IOException {
+  Interceptor.Chain chain = new ApplicationInterceptorChain(0, originalRequest, forWebSocket);
+  return chain.proceed(originalRequest);
+}
+
+ApplicationInterceptorChain은 Interceptor.Chain을 구현한 클래스로서 
+proceed 함수를 보면 가장 먼저 하는 일이 client에 interceptor가 있는지 확인합니다. 
+그래서 있으면 현재 index의 interceptor에 Chain을 넣어줍니다. index가 0에서 부터 1씩 증가하는 걸 보면 
+결국 제일 앞에서부터 순서대로 마지막까지 interceptor가 호출될 것임을 알 수 있습니다. 
+interceptor는 Chain의 Request를 받아서 변경을 하고 다시 Chain의 proceed를 호출해주는 역할을 합니다. 
+그러면 가장 마지막에는 결국 getResponse가 호출되겠네요.
+
+@Override public Response proceed(Request request) throws IOException {
+  if (index < client.interceptors().size()) {
+    // There's another interceptor in the chain. Call that.
+    Interceptor.Chain chain = new ApplicationInterceptorChain(index + 1, request, forWebSocket);
+    return client.interceptors().get(index).intercept(chain);
+  } else {
+    // No more interceptors. Do HTTP.
+    return getResponse(request, forWebSocket);
+  }
+}
+
+다음으로 enqueue를 살펴보지요. 한번 실행을 위해 executed를 true로 설정하는 것은 똑같습니다.
+다음으로는 dispatcher에서 enqueue 함수를 호출하는데 이때 AsyncCall을 사용합니다.
+ 
+void enqueue(Callback responseCallback, boolean forWebSocket) {
+  synchronized (this) {
+    if (executed) throw new IllegalStateException("Already Executed");
+    executed = true;
+  }
+  client.getDispatcher().enqueue(new AsyncCall(responseCallback, forWebSocket));
+}
+
+나중에 dispatcher가 HTTP 요청을 실행할 상황이 되면 큐에 넣어둔 AsyncCall의 execute 함수가 호출이 됩니다. 
+함수를 살펴보면 간단합니다. 
+앞에서의 Call의 execute 함수와 같이 getResponseWithInterceptorChain를 호출하여 
+Response를 얻어오고 끝났음을 dispatcher에 알려줍니다. 
+하나의 차이점은 여기서의 호출은 다른 쓰레드에서 이루어지고 있는 것이므로 
+정상적으로 끝났는지 아니면 중간에 취소가 있었는지를 원래의 호출쪽에 알려주는 콜백이 들어가 있다는 점입니다. 
+이 역할은 Callback 클래스에서의 onResponse와 onFailure 함수를 통해 이루어지게 됩니다.
+이제 getResponse 함수를 살펴봅시다.
+가장 먼저 body를 확인하여 body가 있으면 새로운 Request를 만들어 줍니다. 
+이렇게 새 Request를 만드는 이유는 body가 있다면 헤더의 내용이 달라지기 때문입니다. 
+body와 관련된 헤더를 처리하는 부분은 아래와 같습니다.
+
+  // Copy body metadata to the appropriate request headers.
+  RequestBody body = request.body();
+  if (body != null) {
+    Request.Builder requestBuilder = request.newBuilder();
+
+    MediaType contentType = body.contentType();
+    if (contentType != null) {
+      // Content Type이 지정되어 있으면 헤더에 넣어준다.
+      requestBuilder.header("Content-Type", contentType.toString());
+    }
+
+    long contentLength = body.contentLength();
+    if (contentLength != -1) {
+      // 길이를 알면
+      requestBuilder.header("Content-Length", Long.toString(contentLength));
+      requestBuilder.removeHeader("Transfer-Encoding");
+    } else {
+      // 길이를 모르면
+      requestBuilder.header("Transfer-Encoding", "chunked");
+      requestBuilder.removeHeader("Content-Length");
+    }
+
+    request = requestBuilder.build();
+  }
+  
+다음으로 HttpEngine을 생성해 줍니다. 
+이 HttpEngine에서 request와 response를 처리해줍니다. 
+이에 사용되는 함수는 다음과 같습니다. 
+sendRequest, readResponse, getResponse. 
+응답을 받고 나면 followUpRequest 함수를 통해 redirect등의 작업이 필요한지를 확인합니다. 
+followUp이 null이 아니면 이 작업이 필요하다는 것입니다. 
+그럴 경우엔 기존의 HttpEngine을 종료(close 함수 사용)하고 새로운 HttpEngine을 만들어서 사용합니다. 
+이때의 차이점은 Connection은 이전에 사용하던 것을 그대로 재활용 한다는 것입니다.
+
